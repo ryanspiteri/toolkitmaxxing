@@ -13,9 +13,6 @@ claude plugin install browser-tools@toolkitmaxxing
 
 Or inside Claude Code: `/plugin marketplace add ryanspiteri/toolkitmaxxing`, then `/plugin` to browse.
 
-The repo is private: you need to be added as a collaborator, and `gh auth login` (or a git credential) on your
-machine so Claude Code can clone it.
-
 Get updates later with `claude plugin marketplace update toolkitmaxxing`.
 
 ## Tools
