@@ -235,9 +235,19 @@ run_task() {
     # Chrome running for the next one.
     nohup perl -e 'setpgrp(0, 0); exec @ARGV or die "cannot start Chrome: $!\n"' "$CHROME" --headless=new \
       --remote-debugging-port=0 --user-data-dir="$PROFILE" \
-      --no-first-run --no-default-browser-check "${chrome_extra[@]}" about:blank >/dev/null 2>&1 &
+      --no-first-run --no-default-browser-check "${chrome_extra[@]}" about:blank >"$BH_HOME/chrome-$SLOT.log" 2>&1 &
     for _ in {1..40}; do chrome_ok && break; sleep 0.25; done
     if ! chrome_ok; then
+      # Say which of the three checks failed, plus Chrome's own last words, so the cause is visible.
+      if chrome_running; then echo "  chrome process: running"; else echo "  chrome process: not found"; fi
+      if read_port_file; then
+        echo "  port file: port $PORT, path $WSPATH"
+        echo "  /json/version: $(curl -sf -m 1 --noproxy '*' "http://127.0.0.1:$PORT/json/version" | tr -d '\n' | cut -c1-300)"
+      else
+        echo "  port file: missing or unreadable ($PROFILE/DevToolsActivePort)"
+      fi
+      echo "  chrome output (last 15 lines of $BH_HOME/chrome-$SLOT.log):"
+      tail -n 15 "$BH_HOME/chrome-$SLOT.log" 2>/dev/null | sed 's/^/    /'
       stop_chrome
       echo "headless Chrome did not start for slot $SLOT"
       exit 1
