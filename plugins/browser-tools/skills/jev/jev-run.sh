@@ -224,7 +224,7 @@ run_task() {
   #   our Chrome runs + port file readable + its port answers as the browser named in the file  -> reuse
   #   anything else (no Chrome, no or stale port file, port answered by another browser or program)
   #     -> stop this slot's helper and Chrome, delete the port file, launch a new Chrome on a port it picks,
-  #        and require the same three checks within 10 s, else exit 1
+  #        and require the same three checks within 20 s, else exit 1
   if ! chrome_ok; then
     out="$(stop_helpers "jev-$SLOT")" || { echo "$out"; echo "could not stop the Browser Harness helper jev-$SLOT"; exit 1; }
     if chrome_running; then stop_chrome || { echo "could not stop the old Chrome for slot $SLOT"; exit 1; }; fi
@@ -236,7 +236,7 @@ run_task() {
     nohup perl -e 'setpgrp(0, 0); exec @ARGV or die "cannot start Chrome: $!\n"' "$CHROME" --headless=new \
       --remote-debugging-port=0 --user-data-dir="$PROFILE" \
       --no-first-run --no-default-browser-check "${chrome_extra[@]}" about:blank >"$BH_HOME/chrome-$SLOT.log" 2>&1 &
-    for _ in {1..40}; do chrome_ok && break; sleep 0.25; done
+    for _ in {1..80}; do chrome_ok && break; sleep 0.25; done
     if ! chrome_ok; then
       # Say which of the three checks failed, plus Chrome's own last words, so the cause is visible.
       if chrome_running; then echo "  chrome process: running"; else echo "  chrome process: not found"; fi
