@@ -8,6 +8,23 @@ Two browser tools for Claude Code on macOS, set up by one installer.
 - **Agent Reach** ([Panniantong/Agent-Reach](https://github.com/Panniantong/Agent-Reach)): read-only search and
   reading for Reddit, YouTube transcripts, X, GitHub, LinkedIn jobs and more. Installs its own `agent-reach` skill.
 
+## Why this instead of installing Jev and Agent Reach yourself
+
+Same tools, pinned to the versions tested below. The difference is what happens around them. Each fix here is a
+problem we hit setting up the standard versions on 2026-11-21.
+
+| Standard setup | With this plugin |
+|---|---|
+| Jev attaches to your everyday Chrome through Browser Harness, so the agent can use every site you are signed into. On macOS the attach failed outright (`DevToolsActivePort: Operation not permitted`). | Jev gets its own headless Chrome with an empty profile. None of your logins are exposed, and the macOS block does not apply. |
+| The Chrome window jumps in front of whatever you are working on. | Headless: no window, no focus stealing. |
+| The example config's text model (`inception/mercury-2.5`) is no longer on OpenRouter, so every typing step fails with HTTP 404. | Uses `anthropic/claude-haiku-5.5`, which is live, and you can switch it with `JEV_TEXT_MODEL`. |
+| A stuck task runs forever. | Stopped after 60 s (`JEV_TIMEOUT`), whole process group killed, no leftovers. |
+| Each tool is installed separately from its latest build, which can change under you. | One installer, safe to re-run, with Jev and Agent Reach pinned to tested versions. |
+| Claude does not know when to use which tool. | The `jev` skill tells Claude to use Jev for clicking through public sites, Agent Reach or WebFetch for reading, and your own browser for anything that needs a login. It also says never to pay, send, post or delete, and to check that a "done" task really reached the goal. |
+| Keys sit in `.env`, and nothing stops an agent from printing them. | The skill forbids reading the key file and checks keys without showing them. |
+
+None of this makes Jev itself faster. A typical task still takes 3 to 10 seconds.
+
 ## Setup
 
 1. Install the plugin (see the repo README).
