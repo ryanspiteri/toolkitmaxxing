@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   validate:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,6 +41,8 @@ jobs:
           sc="$RUNNER_TEMP/shellcheck-v$SHELLCHECK_VERSION/shellcheck"
           "$sc" --version
           git ls-files -z '*.sh' | xargs -0 "$sc"
+      - name: jev-text.py compiles
+        run: python3 -m py_compile plugins/browser-tools/skills/jev/jev-text.py
       - name: SKILL.md upgrade check matches the launcher version
         run: |
           set -euo pipefail
@@ -76,7 +78,8 @@ jobs:
           "$RUNNER_TEMP/gitleaks" git --redact -v .
 
   version-bump:
-    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # On workflow_dispatch there is no base commit, so the script skips the comparison.
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -86,11 +89,12 @@ jobs:
       - name: Check plugin versions were bumped
         env:
           # PR: the base branch commit. Push to main: the previous tip (all zeros on a first push, which skips).
-          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          # workflow_dispatch: empty, which skips.
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
         run: .github/scripts/check-version-bump.sh "$BASE"
 
   install:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -113,6 +117,7 @@ jobs:
           set -euo pipefail
           jev="$HOME/tools/jev-ultrafast"
           test -x "$jev/jev-run.sh"
+          test -f "$jev/jev-text.py"
           pinned="$(grep -m1 '^JEV_COMMIT=' plugins/browser-tools/skills/jev/install.sh | cut -d'"' -f2)"
           test "$(git -C "$jev" rev-parse HEAD)" = "$pinned"
           test -f "$jev/.env"
@@ -121,22 +126,29 @@ jobs:
           reach_pin="$(grep -m1 '^AGENT_REACH_URL=' plugins/browser-tools/skills/jev/install.sh | sed -E 's#.*/download/v([^/]+)/.*#\1#')"
           uv tool list | grep -qx "agent-reach v$reach_pin" || { uv tool list; echo "agent-reach is not v$reach_pin"; exit 1; }
           test -f "$HOME/tools/agent-reach/agent-reach-$reach_pin.zip"
+          receipt="$(uv tool dir)/agent-reach/uv-receipt.toml"
+          grep -F "path = \"$HOME/tools/agent-reach/agent-reach-$reach_pin.zip\"" "$receipt" || { cat "$receipt"; echo "agent-reach was not installed from the kept zip"; exit 1; }
           test "$(stat -c %a "$jev/.env" 2>/dev/null || stat -f %Lp "$jev/.env")" = 600
           skills="$HOME/.agents/skills"
           test -f "$skills/jev/SKILL.md"
           test -x "$skills/jev/install.sh"
           test -x "$skills/jev/jev-run.sh"
+          test -f "$skills/jev/jev-text.py"
           test -f "$skills/agent-reach/SKILL.md"
-      - name: Launcher starts headless Chrome
+      - name: Launcher starts and verifies headless Chrome
         timeout-minutes: 5
         env:
           # Ubuntu runners block Chrome's sandbox for unprivileged users. Harmless on macOS.
           JEV_CHROME_ARGS: --no-sandbox
-          JEV_TIMEOUT: 20
+          JEV_TIMEOUT: 30
         run: |
-          # No API keys here, so the task itself is expected to fail. Only the Chrome start is checked.
-          "$HOME/tools/jev-ultrafast/jev-run.sh" https://example.com "Stop." || echo "run exited $? (expected without keys)"
-          for _ in $(seq 1 20); do curl -sf -m 1 --noproxy '*' http://127.0.0.1:9333/json/version && break; sleep 1; done
-          curl -sf -m 1 --noproxy '*' http://127.0.0.1:9333/json/version
+          set -euo pipefail
+          # --check takes a slot and starts or verifies its Chrome exactly as a task would; no keys needed.
+          # macOS runs it with the system bash 3.2, as friends' Macs will.
+          if [ "$RUNNER_OS" = macOS ]; then
+            /bin/bash "$HOME/tools/jev-ultrafast/jev-run.sh" --check
+          else
+            "$HOME/tools/jev-ultrafast/jev-run.sh" --check
+          fi
           "$HOME/tools/jev-ultrafast/jev-run.sh" --stop
           if pgrep -U "$(id -u)" -f '[j]ev-chrome-profile-'; then echo "Chrome still running after --stop"; exit 1; fi

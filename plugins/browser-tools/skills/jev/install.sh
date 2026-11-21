@@ -3,7 +3,8 @@
 #   1. Agent Reach (read-only platform access), pinned release checked against its sha256 and kept in
 #      ~/tools/agent-reach, plus its skill
 #   2. Jev Ultrafast (headless clicking agent), pinned commit, at ~/tools/jev-ultrafast
-#   3. jev-run.sh launcher, and the jev skill copied to ~/.agents/skills/jev for Codex and Kimi Code
+#   3. jev-run.sh launcher and its jev-text.py helper, and the jev skill copied to ~/.agents/skills/jev for Codex
+#      and Kimi Code
 # API keys are never shipped. A fresh Jev gets a blank .env; add your own
 # TYPESAFE_API_KEY and TEXT_MODEL_API_KEY in ~/tools/jev-ultrafast/.env
 # Needs: git, uv (https://docs.astral.sh/uv/), curl, perl, pgrep and pkill, and Google Chrome or Chromium
@@ -37,6 +38,7 @@ for t in curl perl pkill pgrep; do
   fi
 done
 [ -z "$tools_missing" ] || exit 1
+user_path="$PATH"
 export PATH="$HOME/.local/bin:$PATH"
 chrome_ok=""
 if [ -n "${JEV_CHROME:-}" ]; then
@@ -55,13 +57,18 @@ sha256_of() {
 }
 
 # 1. Agent Reach, installed from a kept copy of the pinned release (so `uv tool upgrade` keeps a valid source).
-# Installs when agent-reach is missing, or when uv has a different version than the pin (bump the pin to update).
+# The only agent-reach trusted is the uv-managed one whose uv receipt names that kept zip as its source and whose
+# version is the pin. Anything else is (re)installed from the verified zip. Bump the pin to update.
 reach_version="${AGENT_REACH_URL#*/download/v}"
 reach_version="${reach_version%%/*}"
 reach_zip="$HOME/tools/agent-reach/agent-reach-$reach_version.zip"
+uv_bin="$(uv tool dir --bin 2>/dev/null || true)"
+[ -n "$uv_bin" ] || uv_bin="$HOME/.local/bin"
+reach_receipt="$(uv tool dir 2>/dev/null || true)/agent-reach/uv-receipt.toml"
 reach_installed="$(uv tool list 2>/dev/null | sed -n 's/^agent-reach v//p' || true)"
 reach_changed=""
-if ! command -v agent-reach >/dev/null || { [ -n "$reach_installed" ] && [ "$reach_installed" != "$reach_version" ]; }; then
+if [ "$reach_installed" != "$reach_version" ] || [ ! -x "$uv_bin/agent-reach" ] \
+  || ! grep -qF "path = \"$reach_zip\"" "$reach_receipt" 2>/dev/null; then
   mkdir -p "$HOME/tools/agent-reach"
   if [ ! -f "$reach_zip" ] || [ "$(sha256_of "$reach_zip")" != "$AGENT_REACH_SHA256" ]; then
     curl -fsSL -o "$reach_zip.part" "$AGENT_REACH_URL" || { rm -f "$reach_zip.part"; echo "could not download $AGENT_REACH_URL"; exit 1; }
@@ -74,21 +81,43 @@ if ! command -v agent-reach >/dev/null || { [ -n "$reach_installed" ] && [ "$rea
     exit 1
   fi
   echo "agent-reach zip -> $reach_zip (sha256 ok)"
-  uv tool install "agent-reach @ file://$reach_zip"
+  uv tool install --reinstall "agent-reach @ file://$reach_zip"
   reach_changed=1
+fi
+reach_bin="$uv_bin/agent-reach"
+[ -x "$reach_bin" ] || { echo "agent-reach was not installed at $reach_bin"; exit 1; }
+# Agents run whichever agent-reach comes first on PATH; say so if that is not this one.
+reach_first="$(PATH="$user_path" command -v agent-reach || true)"
+if [ -n "$reach_first" ] && [ ! "$reach_first" -ef "$reach_bin" ]; then
+  echo "warning: $reach_first comes before $reach_bin on your PATH, so agents will run that agent-reach instead."
+  echo "  Remove it, or put $uv_bin earlier on your PATH."
 fi
 # Run setup after (re)installing Agent Reach, when its own skill copy is missing (it always puts it in
 # ~/.agents/skills, whatever AGENTS_SKILLS_DIR says), or when Claude Code is present and has no link to it.
 if [ -n "$reach_changed" ] || [ ! -f "$HOME/.agents/skills/agent-reach/SKILL.md" ] \
   || { [ -d "$claude_home" ] && [ ! -e "$claude_home/skills/agent-reach" ]; }; then
   # Default channels + links its skill. No prompts; its long JSON report is shown only if setup fails.
-  setup_out="$(agent-reach setup </dev/null 2>&1)" || { echo "$setup_out"; echo "agent-reach setup failed"; exit 1; }
+  # Agent Reach writes its skill in Chinese unless a locale variable starts with "en". With no locale set at all
+  # (common in agent shells), ask for English; a locale that is set, Chinese or not, is left alone.
+  if [ -z "${AGENT_REACH_LANG:-}${LC_ALL:-}${LC_MESSAGES:-}${LANG:-}" ]; then
+    setup_out="$(AGENT_REACH_LANG=en "$reach_bin" setup </dev/null 2>&1)" || { echo "$setup_out"; echo "agent-reach setup failed"; exit 1; }
+  else
+    setup_out="$("$reach_bin" setup </dev/null 2>&1)" || { echo "$setup_out"; echo "agent-reach setup failed"; exit 1; }
+  fi
 fi
 echo "agent-reach -> $(uv tool list 2>/dev/null | grep -m1 '^agent-reach' || echo installed)"
 
 # 2. Jev, pinned
 mkdir -p "$HOME/tools"
 [ -d "$JEV_DIR/.git" ] || git clone -q "$JEV_REPO" "$JEV_DIR"
+# Never build over local edits to Jev's own files. (.env, launcher.env, jev-run.sh and .harness are not Jev's files.)
+jev_changed="$(git -C "$JEV_DIR" status --porcelain --untracked-files=no)"
+if [ -n "$jev_changed" ]; then
+  echo "$JEV_DIR has local changes to Jev's own files:"
+  echo "$jev_changed"
+  echo "run: git -C ~/tools/jev-ultrafast checkout -- . (your .env and launcher.env are untracked and kept)"
+  exit 1
+fi
 if [ "$(git -C "$JEV_DIR" rev-parse HEAD)" != "$JEV_COMMIT" ]; then
   git -C "$JEV_DIR" fetch -q origin
   git -C "$JEV_DIR" -c advice.detachedHead=false checkout -q "$JEV_COMMIT"
@@ -99,6 +128,7 @@ echo "jev         -> $JEV_DIR @ ${JEV_COMMIT:0:7}"
 
 # 3. Launcher, .env and launcher.env
 cp "$here/jev-run.sh" "$JEV_DIR/jev-run.sh" && chmod +x "$JEV_DIR/jev-run.sh"
+cp "$here/jev-text.py" "$JEV_DIR/jev-text.py"
 if [ ! -f "$JEV_DIR/.env" ]; then
   # The launcher sets the text model; drop the example's stale TEXT_MODEL line so there is one setting.
   grep -v '^TEXT_MODEL=' "$JEV_DIR/.env.example" > "$JEV_DIR/.env"
@@ -136,7 +166,7 @@ esac
 # 4. Shared skill for Codex and Kimi Code (Claude Code gets it from the plugin instead)
 mkdir -p "$agents_skills/jev"
 if [ "$(cd "$agents_skills/jev" && pwd -P)" != "$(cd "$here" && pwd -P)" ]; then
-  cp "$here/SKILL.md" "$here/install.sh" "$here/jev-run.sh" "$agents_skills/jev/"
+  cp "$here/SKILL.md" "$here/install.sh" "$here/jev-run.sh" "$here/jev-text.py" "$agents_skills/jev/"
   chmod +x "$agents_skills/jev/install.sh" "$agents_skills/jev/jev-run.sh"
 fi
 echo "shared skill -> $agents_skills/jev (Codex, Kimi Code)"
