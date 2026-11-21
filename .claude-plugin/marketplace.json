@@ -1,0 +1,14 @@
+{
+  "name": "toolkitmaxxing",
+  "description": "toolkitmaxxing: small, tested tools and skills for Claude Code",
+  "owner": {
+    "name": "Ryan Spiteri"
+  },
+  "plugins": [
+    {
+      "name": "browser-tools",
+      "source": "./plugins/browser-tools",
+      "description": "Jev Ultrafast headless browser agent plus Agent Reach read-only platform access, with one installer (macOS)"
+    }
+  ]
+}
