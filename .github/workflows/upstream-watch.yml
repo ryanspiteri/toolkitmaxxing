@@ -1,0 +1,101 @@
+name: Upstream watch
+
+on:
+  schedule:
+    - cron: '0 21 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_TITLE: "Upstream changed: re-test browser-tools"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare pinned versions with upstream
+        run: |
+          set -euo pipefail
+          installer=plugins/browser-tools/skills/jev/install.sh
+          pin="$(grep -m1 '^JEV_COMMIT=' "$installer" | cut -d'"' -f2)"
+          reach_url="$(grep -m1 '^AGENT_REACH_URL=' "$installer" | cut -d'"' -f2)"
+          reach_sha="$(grep -m1 '^AGENT_REACH_SHA256=' "$installer" | cut -d'"' -f2)"
+          reach_pin="$(printf '%s' "$reach_url" | sed -E 's#.*/download/(v[^/]+)/.*#\1#')"
+          findings=""
+
+          jev=browser-use/jev-ultrafast
+          if repo="$(gh api "repos/$jev" --jq '[.default_branch, .archived] | @tsv' 2>/dev/null)"; then
+            branch="$(printf '%s' "$repo" | cut -f1)"
+            if [ "$(printf '%s' "$repo" | cut -f2)" = true ]; then
+              findings="$findings- $jev is archived. Jev is no longer maintained.\n"
+            fi
+            if ahead="$(gh api "repos/$jev/compare/$pin...$branch" --jq .ahead_by 2>/dev/null)"; then
+              if [ "$ahead" -gt 0 ]; then
+                findings="$findings- $jev has $ahead new commit(s) on $branch since our pin \`${pin:0:7}\`.\n"
+              fi
+            else
+              findings="$findings- Could not compare $jev $branch with our pin \`${pin:0:7}\` (rewritten history?).\n"
+            fi
+          else
+            findings="$findings- $jev unreachable (deleted or renamed?)\n"
+          fi
+
+          reach=Panniantong/Agent-Reach
+          if reach_latest="$(gh api "repos/$reach/releases/latest" --jq .tag_name 2>/dev/null)"; then
+            if [ "$reach_latest" != "$reach_pin" ]; then
+              findings="$findings- Agent Reach latest release is $reach_latest; we pin $reach_pin.\n"
+            fi
+          else
+            findings="$findings- $reach releases unreachable (deleted or renamed?)\n"
+          fi
+
+          # The pinned asset must still be the exact file we tested.
+          zip="$RUNNER_TEMP/agent-reach.zip"
+          if curl -fsSL -o "$zip" "$reach_url"; then
+            got="$(sha256sum "$zip" | cut -d' ' -f1)"
+            if [ "$got" != "$reach_sha" ]; then
+              findings="$findings- Agent Reach $reach_pin asset changed: sha256 is now $got, we pin $reach_sha.\n"
+            fi
+          else
+            findings="$findings- Could not download the pinned Agent Reach asset $reach_url.\n"
+          fi
+
+          if [ -z "$findings" ]; then
+            echo "Pins are current. Nothing to report."
+            exit 0
+          fi
+
+          printf '%b' "$findings"
+          {
+            printf 'The weekly upstream check found changes:\n\n'
+            printf '%b' "$findings"
+            cat <<'BODY'
+
+          What to do: re-run the install job on a branch with the new version, run the Wikipedia test from the
+          browser-tools README, then update the pin in `install.sh` (and `AGENT_REACH_SHA256` for a new Agent Reach
+          release), the README "Tested" section and the plugin `version`.
+
+          If Jev is archived or stale, consider browser-use's built-in `mode='ultrafast'` as the maintained successor:
+          `pip install browser-use`, then `Agent(task, mode='ultrafast')`.
+          BODY
+          } > "$RUNNER_TEMP/issue.md"
+
+          # One open issue per title. If it exists, add a comment only when the findings differ from what the
+          # issue (or its latest comment) already says.
+          issue="$(gh issue list --state open --limit 100 --json number,title --jq "[.[] | select(.title == \"$ISSUE_TITLE\")][0].number // empty")"
+          if [ -n "$issue" ]; then
+            last="$(gh issue view "$issue" --json body,comments --jq 'if (.comments | length) > 0 then .comments[-1].body else .body end')"
+            if [ "$(printf '%s' "$last" | tr -d '\r')" = "$(tr -d '\r' < "$RUNNER_TEMP/issue.md")" ]; then
+              echo "Issue #$issue already lists these findings. Nothing new to add."
+              exit 0
+            fi
+            gh issue comment "$issue" --body-file "$RUNNER_TEMP/issue.md"
+            exit 0
+          fi
+          gh issue create --title "$ISSUE_TITLE" --body-file "$RUNNER_TEMP/issue.md"

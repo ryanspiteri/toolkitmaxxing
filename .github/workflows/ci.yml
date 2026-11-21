@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 20 * * 0'   # weekly secrets scan; only the secrets job runs on this trigger
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.327
+      - name: Validate marketplace
+        run: claude plugin validate .
+      - name: Validate browser-tools
+        run: claude plugin validate ./plugins/browser-tools
+      - name: Shellcheck (pinned release)
+        env:
+          SHELLCHECK_VERSION: 0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          f="$RUNNER_TEMP/shellcheck.tar.xz"
+          curl -fsSL -o "$f" "https://github.com/koalaman/shellcheck/releases/download/v$SHELLCHECK_VERSION/shellcheck-v$SHELLCHECK_VERSION.linux.x86_64.tar.xz"
+          echo "$SHELLCHECK_SHA256  $f" | sha256sum -c -
+          tar -xJf "$f" -C "$RUNNER_TEMP"
+          sc="$RUNNER_TEMP/shellcheck-v$SHELLCHECK_VERSION/shellcheck"
+          "$sc" --version
+          git ls-files -z '*.sh' | xargs -0 "$sc"
+      - name: SKILL.md upgrade check matches the launcher version
+        run: |
+          set -euo pipefail
+          d=plugins/browser-tools/skills/jev
+          launcher="$(grep -E '^JEV_RUN_VERSION=' "$d/jev-run.sh")"
+          skill="$(grep -oE 'JEV_RUN_VERSION=[0-9][0-9.]*[0-9]' "$d/SKILL.md" | sort -u)"
+          echo "jev-run.sh: $launcher"
+          echo "SKILL.md:   $skill"
+          test -n "$launcher"
+          test "$skill" = "$launcher"
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks (pinned release)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          # From gitleaks_8.30.1_checksums.txt in the release.
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          f="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -fsSL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "$GITLEAKS_SHA256  $f" | sha256sum -c -
+          tar -xzf "$f" -C "$RUNNER_TEMP" gitleaks
+      - name: Scan full history
+        run: |
+          "$RUNNER_TEMP/gitleaks" version
+          "$RUNNER_TEMP/gitleaks" git --redact -v .
+
+  version-bump:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check plugin versions were bumped
+        env:
+          # PR: the base branch commit. Push to main: the previous tip (all zeros on a first push, which skips).
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: .github/scripts/check-version-bump.sh "$BASE"
+
+  install:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - name: Install
+        timeout-minutes: 10
+        env:
+          CLAUDE_HOME: ${{ runner.temp }}/claude
+        run: |
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          bash plugins/browser-tools/skills/jev/install.sh </dev/null
+      - name: Check install result
+        run: |
+          set -euo pipefail
+          jev="$HOME/tools/jev-ultrafast"
+          test -x "$jev/jev-run.sh"
+          pinned="$(grep -m1 '^JEV_COMMIT=' plugins/browser-tools/skills/jev/install.sh | cut -d'"' -f2)"
+          test "$(git -C "$jev" rev-parse HEAD)" = "$pinned"
+          test -f "$jev/.env"
+          if grep -q '^TEXT_MODEL=' "$jev/.env"; then echo "TEXT_MODEL line in .env"; exit 1; fi
+          command -v agent-reach
+          reach_pin="$(grep -m1 '^AGENT_REACH_URL=' plugins/browser-tools/skills/jev/install.sh | sed -E 's#.*/download/v([^/]+)/.*#\1#')"
+          uv tool list | grep -qx "agent-reach v$reach_pin" || { uv tool list; echo "agent-reach is not v$reach_pin"; exit 1; }
+          test -f "$HOME/tools/agent-reach/agent-reach-$reach_pin.zip"
+          test "$(stat -c %a "$jev/.env" 2>/dev/null || stat -f %Lp "$jev/.env")" = 600
+          skills="$HOME/.agents/skills"
+          test -f "$skills/jev/SKILL.md"
+          test -x "$skills/jev/install.sh"
+          test -x "$skills/jev/jev-run.sh"
+          test -f "$skills/agent-reach/SKILL.md"
+      - name: Launcher starts headless Chrome
+        timeout-minutes: 5
+        env:
+          # Ubuntu runners block Chrome's sandbox for unprivileged users. Harmless on macOS.
+          JEV_CHROME_ARGS: --no-sandbox
+          JEV_TIMEOUT: 20
+        run: |
+          # No API keys here, so the task itself is expected to fail. Only the Chrome start is checked.
+          "$HOME/tools/jev-ultrafast/jev-run.sh" https://example.com "Stop." || echo "run exited $? (expected without keys)"
+          for _ in $(seq 1 20); do curl -sf -m 1 --noproxy '*' http://127.0.0.1:9333/json/version && break; sleep 1; done
+          curl -sf -m 1 --noproxy '*' http://127.0.0.1:9333/json/version
+          "$HOME/tools/jev-ultrafast/jev-run.sh" --stop
+          if pgrep -U "$(id -u)" -f '[j]ev-chrome-profile-'; then echo "Chrome still running after --stop"; exit 1; fi
